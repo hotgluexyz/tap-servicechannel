@@ -2,7 +2,7 @@
 
 import os
 import re
-from typing import Any, Dict, Iterable, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -16,6 +16,133 @@ from tap_servicechannel.filters import (
 )
 
 
+class TradesStream(ServiceChannelStream):
+    """Subscriber trades.
+
+    Used as the parent of :class:`VendorsStream` (vendors are only listable
+    per-trade). It is a plain REST endpoint that returns a bare JSON array and
+    is not paginated, so the OData query params and pagination are disabled.
+    """
+
+    name = "trades"
+    path = "/v3/trades"
+    replication_key = None
+    records_jsonpath = "$[*]"
+
+    schema = th.PropertiesList(
+        th.Property("Id", th.IntegerType),
+        th.Property("Name", th.StringType),
+        th.Property("SubscriberId", th.IntegerType),
+    ).to_dict()
+
+    def get_url_params(
+        self, context: Optional[dict], next_page_token: Optional[Any]
+    ) -> Dict[str, Any]:
+        return {}
+
+    def get_next_page_token(
+        self, response: requests.Response, previous_token: Optional[Any]
+    ) -> None:
+        return None
+
+    def get_child_context(self, record: dict, context: Optional[dict]) -> dict:
+        return {"trade_id": record["Id"]}
+
+
+class VendorsStream(ServiceChannelStream):
+    """Vendors (ServiceChannel "providers").
+
+    ServiceChannel exposes no usable ``/odata/providers`` collection endpoint
+    (a plain ``GET`` there returns a server-side 500 due to ambiguous routing),
+    and there is no "list all providers" route. Providers are only listable per
+    trade via ``/v3/providers/getbytradeid``, so this stream is a child of
+    :class:`TradesStream`: it fetches the providers for each trade and emits the
+    distinct providers (de-duplicated by ``Id`` across trades within a run).
+
+    Only ``Id``/``Name``/``DoNotDispatch`` are available from this endpoint; the
+    richer provider fields are not exposed by any working list/detail route.
+    """
+
+    name = "vendors"
+    path = "/v3/providers/getbytradeid"
+    parent_stream_type = TradesStream
+    replication_key = None
+    records_jsonpath = "$.Providers[*]"
+
+    schema = th.PropertiesList(
+        th.Property("Id", th.IntegerType),
+        th.Property("Name", th.StringType),
+        th.Property("DoNotDispatch", th.BooleanType),
+    ).to_dict()
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._seen_ids: Set[Any] = set()
+
+    def get_url_params(
+        self, context: Optional[dict], next_page_token: Optional[Any]
+    ) -> Dict[str, Any]:
+        return {"tradeId": (context or {})["trade_id"]}
+
+    def get_next_page_token(
+        self, response: requests.Response, previous_token: Optional[Any]
+    ) -> None:
+        return None
+
+    def post_process(self, row: dict, context: Optional[dict] = None) -> Optional[dict]:
+        row = super().post_process(row, context) or row
+        provider_id = row.get("Id")
+        if provider_id in self._seen_ids:
+            return None
+        self._seen_ids.add(provider_id)
+        return row
+
+    def get_available_filters_reference_data(
+        self, fields_to_include: Set[str]
+    ) -> List[Dict[str, Any]]:
+        """Return the distinct vendors used to populate invoice filter options.
+
+        Backs the ``reference_data.vendors.Id`` options declared by
+        :meth:`InvoicesStream.get_available_filters_metadata`. Vendors
+        (ServiceChannel "providers") are only listable per trade, so this walks
+        the same Trades -> providers path this stream syncs on: it lists every
+        trade via ``/v3/trades`` then collects the providers for each trade via
+        ``/v3/providers/getbytradeid``, de-duplicating by provider ``Id`` so
+        callers get a compact vendor pick-list.
+        """
+        trades_url = f"{self.url_base}/v3/trades"
+        trades_request = self.build_prepared_request("GET", trades_url)
+        trades_response = self.request_decorator(self._request)(trades_request, None)
+        trades = trades_response.json() or []
+
+        providers_url = f"{self.url_base}{self.path}"
+        seen: Set[Any] = set()
+        reference_data: List[Dict[str, Any]] = []
+        for trade in trades:
+            trade_id = trade.get("Id")
+            if trade_id is None:
+                continue
+            request = self.build_prepared_request(
+                "GET", providers_url, params={"tradeId": trade_id}
+            )
+            response = self.request_decorator(self._request)(request, None)
+            providers = response.json().get("Providers", []) or []
+            for provider in providers:
+                provider_id = provider.get("Id")
+                if provider_id is None or provider_id in seen:
+                    continue
+                seen.add(provider_id)
+                reference_data.append(
+                    {
+                        "Id": provider_id,
+                        "Name": provider.get("Name"),
+                        "Name__Id": f"{provider.get('Name')} -> ({provider_id})",
+                    }
+                )
+
+        return reference_data
+
+
 class InvoicesStream(ServiceChannelStream):
 
     name = "invoices"
@@ -26,49 +153,7 @@ class InvoicesStream(ServiceChannelStream):
         # setup_selected_filters() during construction.
         self._vendor_payee_ids: Set[str] = set()
         super().__init__(*args, **kwargs)
-        # Config fallback so filtering also works without a selected-filters file.
-        config_vendors = self.config.get("vendor_payee_ids")
-        if config_vendors is not None:
-            values = (
-                config_vendors if isinstance(config_vendors, list) else [config_vendors]
-            )
-            self._vendor_payee_ids.update(str(v) for v in values)
-
-    def setup_selected_filters(self) -> None:
-        self._vendor_payee_ids |= parse_vendor_filter_selection(self._selected_filters)
-
-    def get_available_filters_metadata(self) -> Dict[str, Any]:
-        return {
-            "supported_operators": ["AND", "OR"],
-            "supports_nesting_clauses": False,
-            "filters": {
-                "vendor_payee_id": {
-                    "label": "Vendor",
-                    "supported_operators": ["IN", "EQ"],
-                    "target_field": "VendorPayeeId",
-                    "options": "reference_data.invoices.VendorPayeeId",
-                },
-            },
-        }
-
-    def get_url_params(
-        self, context: Optional[dict], next_page_token: Optional[Any]
-    ) -> Dict[str, Any]:
-        params = super().get_url_params(context, next_page_token)
-        vendor_clause = build_vendor_odata_filter(self._vendor_payee_ids)
-        if vendor_clause:
-            existing = params.get("$filter")
-            params["$filter"] = (
-                f"{existing} and {vendor_clause}" if existing else vendor_clause
-            )
-        return params
-
-    def post_process(self, row: dict, context: Optional[dict] = None) -> Optional[dict]:
-        row = super().post_process(row, context) or row
-        if not record_matches_vendor_filters(row, self._vendor_payee_ids):
-            return None
-        return row
-
+        
     schema = th.PropertiesList(
         th.Property("Id", th.IntegerType),
         th.Property("Number", th.StringType),
@@ -159,6 +244,41 @@ class InvoicesStream(ServiceChannelStream):
         th.Property("IsChargesApprovalCodesDefault", th.BooleanType),
         th.Property("StoredFeatures", th.ArrayType(th.StringType)),
     ).to_dict()
+
+    def setup_selected_filters(self) -> None:
+        self._vendor_payee_ids |= parse_vendor_filter_selection(self._selected_filters)
+
+    def get_available_filters_metadata(self) -> Dict[str, Any]:
+        return {
+            "supported_operators": ["AND", "OR"],
+            "supports_nesting_clauses": False,
+            "filters": {
+                "vendor_payee_id": {
+                    "label": "Vendor",
+                    "supported_operators": ["IN", "EQ"],
+                    "target_field": "VendorPayeeId",
+                    "options": "reference_data.vendors.Id",
+                },
+            },
+        }
+
+    def get_url_params(
+        self, context: Optional[dict], next_page_token: Optional[Any]
+    ) -> Dict[str, Any]:
+        params = super().get_url_params(context, next_page_token)
+        vendor_clause = build_vendor_odata_filter(self._vendor_payee_ids)
+        if vendor_clause:
+            existing = params.get("$filter")
+            params["$filter"] = (
+                f"{existing} and {vendor_clause}" if existing else vendor_clause
+            )
+        return params
+
+    def post_process(self, row: dict, context: Optional[dict] = None) -> Optional[dict]:
+        row = super().post_process(row, context) or row
+        if not record_matches_vendor_filters(row, self._vendor_payee_ids):
+            return None
+        return row
 
     def get_child_context(self, record: dict, context: Optional[dict]) -> dict:
         return {

@@ -8,11 +8,15 @@ from hotglue_singer_sdk import typing as th
 from tap_servicechannel.streams import (
     AttachmentsStream,
     InvoicesStream,
+    TradesStream,
+    VendorsStream,
 )
 
 STREAM_TYPES = [
     InvoicesStream,
     AttachmentsStream,
+    TradesStream,
+    VendorsStream,
 ]
 
 
