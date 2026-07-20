@@ -17,6 +17,7 @@ class ServiceChannelStream(RESTStream):
     replication_tz = timezone(timedelta(hours=-4))
     records_jsonpath = "$.value[*]"
     page_size = 50
+    expand_fields = None
 
     @property
     @cached
@@ -38,6 +39,8 @@ class ServiceChannelStream(RESTStream):
         params: dict = {"$top": self.page_size}
         if next_page_token:
             params["$skip"] = next_page_token
+        if self.expand_fields:
+            params["$expand"] = self.expand_fields
         if self.replication_key:
             params["$orderby"] = f"{self.replication_key} asc"
             start_date = self.get_starting_timestamp(context)

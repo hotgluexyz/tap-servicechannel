@@ -5,55 +5,66 @@ from __future__ import annotations
 from typing import Any, Optional, Set
 
 
-def parse_vendor_filter_selection(selected_filters: Optional[dict]) -> Set[str]:
-    """Extract the vendor payee id allow-list from Hotglue selected filter config.
+def parse_provider_filter_selection(selected_filters: Optional[dict]) -> Set[str]:
+    """Extract the provider id allow-list from Hotglue selected filter config.
 
-    Supports both a flat shape (``{"vendor_payee_id": [...]}``) and the clause
-    shape (``{"clauses": [{"field": "vendor_payee_id", "values": [...]}]}``).
+    The stream's selected filters use numbered clauses, e.g.::
+
+        {
+          "clause_1": {
+            "field": "Provider/Id",
+            "operator": "IN",
+            "value": ["Provider Name (2000045779)", ...]
+          }
+        }
+
+    Every numbered clause contributes its ``value`` (a single string for ``EQ``
+    or a list for ``IN``). Option values are ``"<name> (id)"`` display strings,
+    so the trailing id in parentheses is extracted; raw id values are also
+    accepted.
     """
-    vendor_payee_ids: Set[str] = set()
+    provider_ids: Set[str] = set()
     if not selected_filters:
-        return vendor_payee_ids
+        return provider_ids
 
-    for key in ("vendor_payee_id", "vendor_id"):
-        values = selected_filters.get(key)
-        if values:
-            vendor_payee_ids.update(_as_list(values))
+    for clause in selected_filters.values():
+        if not isinstance(clause, dict):
+            continue
 
-    for clause in selected_filters.get("clauses", []):
-        field = clause.get("field") or clause.get("filter_name") or clause.get("name")
-        values = clause.get("values") or clause.get("value")
-        if field in ("vendor_payee_id", "vendor_id"):
-            vendor_payee_ids.update(_as_list(values))
+        values = clause.get("value")
+        if values is None:
+            values = clause.get("values")
+        for raw in _as_list(values):
+            provider_id = _extract_provider_id(raw)
+            if provider_id:
+                provider_ids.add(provider_id)
 
-    return vendor_payee_ids
+    return provider_ids
 
-
-def record_matches_vendor_filters(
-    record: dict[str, Any],
-    vendor_payee_ids: Set[str],
-) -> bool:
-    """Return True when the record passes the vendor filter (or none is set)."""
-    if not vendor_payee_ids:
-        return True
-
-    payee_id = record.get("VendorPayeeId")
-    if payee_id is None:
-        return False
-    return str(payee_id) in vendor_payee_ids
+def _extract_provider_id(value: Any) -> Optional[str]:
+    """Pull the provider id out of a ``"<name> (id)"`` option, else return as-is."""
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith(")") and "(" in text:
+        text = text.rsplit("(", 1)[-1].rstrip(")").strip()
+    return text or None
 
 
-def build_vendor_odata_filter(vendor_payee_ids: Set[str]) -> Optional[str]:
-    """Build an OData ``$filter`` clause to push vendor filtering server-side.
+def build_provider_odata_filter(provider_ids: Set[str]) -> Optional[str]:
+    """Build an OData ``$filter`` clause to push provider filtering server-side.
 
-    ``VendorPayeeId`` is numeric, so only integer-like values are pushed down;
-    any non-numeric values are still enforced client-side by
-    :func:`record_matches_vendor_filters`.
+    ``Provider/Id`` is numeric, so only integer-like values are pushed down;
+    any non-numeric values are ignored.
     """
-    numeric_ids = sorted({v for v in vendor_payee_ids if str(v).lstrip("-").isdigit()})
+    numeric_ids = sorted({v for v in provider_ids if str(v).lstrip("-").isdigit()})
     if not numeric_ids:
         return None
-    clause = " or ".join(f"VendorPayeeId eq {v}" for v in numeric_ids)
+    
+    if len(numeric_ids) == 1:
+        return f"Provider/Id eq {numeric_ids[0]}"
+
+    clause = " or ".join(f"Provider/Id eq {v}" for v in numeric_ids)
     return f"({clause})"
 
 

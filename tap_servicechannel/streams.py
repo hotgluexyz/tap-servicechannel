@@ -10,9 +10,8 @@ from hotglue_singer_sdk import typing as th
 
 from tap_servicechannel.client import ServiceChannelStream
 from tap_servicechannel.filters import (
-    build_vendor_odata_filter,
-    parse_vendor_filter_selection,
-    record_matches_vendor_filters,
+    build_provider_odata_filter,
+    parse_provider_filter_selection,
 )
 
 
@@ -102,13 +101,14 @@ class VendorsStream(ServiceChannelStream):
     ) -> List[Dict[str, Any]]:
         """Return the distinct vendors used to populate invoice filter options.
 
-        Backs the ``reference_data.vendors.Id`` options declared by
+        Backs the ``reference_data.vendors.Name(Id)`` options declared by
         :meth:`InvoicesStream.get_available_filters_metadata`. Vendors
         (ServiceChannel "providers") are only listable per trade, so this walks
         the same Trades -> providers path this stream syncs on: it lists every
         trade via ``/v3/trades`` then collects the providers for each trade via
-        ``/v3/providers/getbytradeid``, de-duplicating by provider ``Id`` so
-        callers get a compact vendor pick-list.
+        ``/v3/providers/getbytradeid``, de-duplicating by provider ``Id``. Each
+        entry exposes the raw ``Id``/``Name`` plus a combined ``"Name (Id)"``
+        display label so callers get a compact vendor pick-list.
         """
         trades_url = f"{self.url_base}/v3/trades"
         trades_request = self.build_prepared_request("GET", trades_url)
@@ -136,7 +136,7 @@ class VendorsStream(ServiceChannelStream):
                     {
                         "Id": provider_id,
                         "Name": provider.get("Name"),
-                        "Name(Id)": f"{provider.get('Name')} -> ({provider_id})",
+                        "Name(Id)": f"{provider.get('Name')} ({provider_id})",
                     }
                 )
 
@@ -146,12 +146,13 @@ class VendorsStream(ServiceChannelStream):
 class InvoicesStream(ServiceChannelStream):
 
     name = "invoices"
-    path = "/odata/invoices"
+    path = "/odata/invoices"    
+    expand_fields = "Provider"
 
     def __init__(self, *args, **kwargs) -> None:
         # Initialize before super().__init__(), which may call
         # setup_selected_filters() during construction.
-        self._vendor_payee_ids: Set[str] = set()
+        self._provider_ids: Set[str] = set()
         super().__init__(*args, **kwargs)
         
     schema = th.PropertiesList(
@@ -243,20 +244,57 @@ class InvoicesStream(ServiceChannelStream):
         th.Property("WoAssignedTo", th.StringType),
         th.Property("IsChargesApprovalCodesDefault", th.BooleanType),
         th.Property("StoredFeatures", th.ArrayType(th.StringType)),
+        th.Property("Provider", th.ObjectType(
+            th.Property("@odata.type", th.StringType),
+            th.Property("Id", th.IntegerType),
+            th.Property("Name", th.StringType),
+            th.Property("DoNotDispatch", th.BooleanType),
+            th.Property("Phone", th.StringType),
+            th.Property("FullName", th.StringType),
+            th.Property("Address1", th.StringType),
+            th.Property("Address2", th.StringType),
+            th.Property("City", th.StringType),
+            th.Property("State", th.StringType),
+            th.Property("Zip", th.StringType),
+            th.Property("Country", th.StringType),
+            th.Property("MainContact", th.StringType),
+            th.Property("DateCreated", th.DateTimeType),
+            th.Property("LastUserDate", th.DateTimeType),
+            th.Property("SuperUser", th.StringType),
+            th.Property("WebSite", th.StringType),
+            th.Property("Email", th.StringType),
+            th.Property("TaxId", th.StringType),
+            th.Property("Trade", th.StringType),
+            th.Property("ProcessingEmail", th.StringType),
+            th.Property("FaxNumber", th.StringType),
+            th.Property("SuiteFloor", th.StringType),
+            th.Property("MailInfo", th.StringType),
+            th.Property("ImageFile", th.StringType),
+            th.Property("ReturnMail", th.StringType),
+            th.Property("MailFrequency", th.StringType),
+            th.Property("FormId", th.StringType),
+            th.Property("Pager", th.StringType),
+            th.Property("NightRequest", th.BooleanType),
+            th.Property("ShortFormatEmail", th.StringType),
+            th.Property("LastTrainingDate", th.DateTimeType),
+            th.Property("LastTrainingDateStr", th.StringType),
+            th.Property("IsInternal", th.BooleanType),
+            th.Property("IsOnOffShoreFeatureEnabled", th.BooleanType),
+        )),
     ).to_dict()
 
     def setup_selected_filters(self) -> None:
-        self._vendor_payee_ids |= parse_vendor_filter_selection(self._selected_filters)
+        self._provider_ids |= parse_provider_filter_selection(self._selected_filters)
 
     def get_available_filters_metadata(self) -> Dict[str, Any]:
         return {
             "supported_operators": ["AND", "OR"],
             "supports_nesting_clauses": False,
             "filters": {
-                "vendor_payee_id": {
+                "provider_id": {
                     "label": "Vendor",
                     "supported_operators": ["IN", "EQ"],
-                    "target_field": "VendorPayeeId",
+                    "target_field": "Provider/Id",
                     "options": "reference_data.vendors.Name(Id)",
                 },
             },
@@ -266,19 +304,13 @@ class InvoicesStream(ServiceChannelStream):
         self, context: Optional[dict], next_page_token: Optional[Any]
     ) -> Dict[str, Any]:
         params = super().get_url_params(context, next_page_token)
-        vendor_clause = build_vendor_odata_filter(self._vendor_payee_ids)
-        if vendor_clause:
+        provider_clause = build_provider_odata_filter(self._provider_ids)
+        if provider_clause:
             existing = params.get("$filter")
             params["$filter"] = (
-                f"{existing} and {vendor_clause}" if existing else vendor_clause
+                f"{existing} and {provider_clause}" if existing else provider_clause
             )
         return params
-
-    def post_process(self, row: dict, context: Optional[dict] = None) -> Optional[dict]:
-        row = super().post_process(row, context) or row
-        if not record_matches_vendor_filters(row, self._vendor_payee_ids):
-            return None
-        return row
 
     def get_child_context(self, record: dict, context: Optional[dict]) -> dict:
         return {

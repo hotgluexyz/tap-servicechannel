@@ -28,25 +28,12 @@ class TapServiceChannel(Tap):
     config_jsonschema = th.PropertiesList(
         th.Property("client_id", th.StringType, required=True),
         th.Property("client_secret", th.StringType, required=True),
-        th.Property("access_token", th.StringType, required=False),
-        th.Property("refresh_token", th.StringType, required=False),
+        th.Property("access_token", th.StringType),
+        th.Property("refresh_token", th.StringType),
         th.Property("username", th.StringType),
         th.Property("password", th.StringType),
         th.Property("start_date", th.DateTimeType, description="The earliest record date to sync"),
-        th.Property(
-            "download_attachments",
-            th.BooleanType,
-            default=False,
-            description="If true, download attachment files to the local output path",
-        ),
-        th.Property(
-            "vendor_payee_ids",
-            th.ArrayType(th.StringType),
-            description=(
-                "Optional allow-list of VendorPayeeId values; only invoices for "
-                "these vendors (and their attachments) are synced"
-            ),
-        ),
+        th.Property("download_attachments", th.BooleanType, default=False),
     ).to_dict()
 
     def discover_streams(self) -> List[Stream]:

@@ -11,12 +11,20 @@ class ServiceChannelAuthenticator(OAuthAuthenticator, metaclass=SingletonMeta):
    
     @property
     def oauth_request_body(self) -> dict:
-
-        return {
-            "grant_type": "password",
-            "username": self.config["username"],
-            "password": self.config["password"],
-        }
+        if self.config.get("refresh_token") is not None:
+            return {
+                "grant_type": "refresh_token",
+                "refresh_token": self.config["refresh_token"],
+            }
+            
+        elif self.config.get("username") is not None and self.config.get("password") is not None:
+            return {
+                "grant_type": "password",
+                "username": self.config["username"],
+                "password": self.config["password"],
+            }
+        else:
+            raise ValueError("Either refresh_token or username/password must be provided in the config")
 
     def update_access_token(self) -> None:
         request_time = utc_now()
