@@ -136,7 +136,7 @@ class VendorsStream(ServiceChannelStream):
                     {
                         "Id": provider_id,
                         "Name": provider.get("Name"),
-                        "Name__Id": f"{provider.get('Name')} -> ({provider_id})",
+                        "Name(Id)": f"{provider.get('Name')} -> ({provider_id})",
                     }
                 )
 
@@ -257,7 +257,7 @@ class InvoicesStream(ServiceChannelStream):
                     "label": "Vendor",
                     "supported_operators": ["IN", "EQ"],
                     "target_field": "VendorPayeeId",
-                    "options": "reference_data.vendors.Id",
+                    "options": "reference_data.vendors.Name(Id)",
                 },
             },
         }
