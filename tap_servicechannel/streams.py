@@ -337,6 +337,7 @@ class AttachmentsStream(ServiceChannelStream):
         th.Property("IsInvoiceDigitalCopy", th.BooleanType),
         th.Property("UploadBy", th.StringType),
         th.Property("wo_tracking_number", th.IntegerType),
+        th.Property("attachment_path", th.StringType),
     ).to_dict()
 
     def get_records(self, context: Optional[dict]) -> Iterable[dict]:
@@ -351,28 +352,39 @@ class AttachmentsStream(ServiceChannelStream):
         return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name) or "attachment"
 
     def _resolve_filename(self, row: dict) -> str:
-        """Pick a stable file name for the attachment record."""
+        """Pick a stable, unique file name for the attachment record."""
         name = row.get("Name") or row.get("Description")
         if not name:
-            # Fall back to the name encoded in the pre-signed URI, then the Id.
+            # Fall back to the name encoded in the pre-signed URI.
             path = urlparse(row.get("Uri") or "").path
             name = unquote(os.path.basename(path)) if path else None
         if not name:
-            name = f"attachment_{row.get('Id')}"
-        return self._sanitize_filename(name)
+            name = "attachment"
+        name = self._sanitize_filename(name)
+        # Prefix with the attachment Id (the primary key) so multiple
+        # attachments on the same invoice that share a display name don't
+        # overwrite each other.
+        attachment_id = row.get("Id")
+        if attachment_id is not None:
+            name = f"{attachment_id}_{name}"
+        return name
 
-    def _download_attachment(self, row: dict, context: Optional[dict]) -> None:
+    def _download_attachment(self, row: dict, context: Optional[dict]) -> Optional[str]:
+        """Download the attachment file and return its path relative to sync-output."""
         uri = row.get("Uri")
         if not uri:
-            return
+            return None
 
         invoice_id = (context or {}).get("invoice_id") or "unknown_invoice"
-        target_dir = os.path.join(self.get_sync_output_folder(), "attachments", str(invoice_id))
-
-        filename = self._resolve_filename(row)
-        target_path = os.path.join(target_dir, filename)
+        # Path relative to the sync-output folder, e.g.
+        # ``attachments/171367500/347326792_IMG_20260401_124316.jpeg``.
+        relative_path = os.path.join(
+            "attachments", str(invoice_id), self._resolve_filename(row)
+        )
+        target_path = os.path.join(self.get_sync_output_folder(), relative_path)
 
         try:
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
             with requests.get(uri, stream=True, timeout=60) as response:
                 response.raise_for_status()
                 with open(target_path, "wb") as fh:
@@ -380,11 +392,16 @@ class AttachmentsStream(ServiceChannelStream):
                         if chunk:
                             fh.write(chunk)
             self.logger.info("Downloaded attachment to %s", target_path)
+            return relative_path
         except Exception as ex:
             self.logger.warning("Failed to download attachment %s from %s: %s", row.get("Id"), uri, ex)
+            return None
 
     def post_process(self, row: dict, context: Optional[dict] = None) -> Optional[dict]:
         row = super().post_process(row, context) or row
+        # The API response omits the work-order link; carry it over from the
+        # parent context so downstream joins back to invoices/work orders work.
+        row["wo_tracking_number"] = (context or {}).get("wo_tracking_number")
         if self.config.get("download_attachments"):
-            self._download_attachment(row, context)
+            row["attachment_path"] = self._download_attachment(row, context)
         return row
