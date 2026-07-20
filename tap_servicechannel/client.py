@@ -1,6 +1,6 @@
+import os
 from datetime import timedelta, timezone
 from typing import Any, Dict, Optional
-
 from hotglue_singer_sdk.streams import RESTStream
 from memoization import cached
 
@@ -52,3 +52,15 @@ class ServiceChannelStream(RESTStream):
                 value = f"{value[:-2]}:{value[-2:]}"
                 params["$filter"] = f"{self.replication_key} ge {value}"
         return params
+    
+    def get_sync_output_folder(self) -> str:
+        """Return the base folder under which output files (attachments) are written.
+
+        In the hotglue runtime ``JOB_ID`` is set and files are uploaded from
+        ``/home/hotglue/{job_id}/sync-output``. Locally we fall back to a
+        ``sync-output`` directory (overridable via the ``output_dir`` config).
+        """
+        job_id = os.environ.get("JOB_ID")
+        if job_id:
+            return f"/home/hotglue/{job_id}/sync-output"
+        return self.config.get("output_dir", "sync-output")

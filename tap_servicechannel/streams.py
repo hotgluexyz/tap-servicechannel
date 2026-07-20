@@ -361,20 +361,13 @@ class AttachmentsStream(ServiceChannelStream):
             name = f"attachment_{row.get('Id')}"
         return self._sanitize_filename(name)
 
-    def _output_folder(self, invoice_id: str) -> str:
-        job_id = os.environ.get("JOB_ID")
-        base = os.path.join("/home/hotglue", job_id, "sync-output") if job_id else "."
-        folder = os.path.join(base, "attachments", invoice_id)
-        os.makedirs(folder, exist_ok=True)
-        return folder
-
     def _download_attachment(self, row: dict, context: Optional[dict]) -> None:
         uri = row.get("Uri")
         if not uri:
             return
 
         invoice_id = (context or {}).get("invoice_id") or "unknown_invoice"
-        target_dir = self._output_folder(str(invoice_id))
+        target_dir = os.path.join(self.get_sync_output_folder(), "attachments", str(invoice_id))
 
         filename = self._resolve_filename(row)
         target_path = os.path.join(target_dir, filename)
@@ -387,13 +380,8 @@ class AttachmentsStream(ServiceChannelStream):
                         if chunk:
                             fh.write(chunk)
             self.logger.info("Downloaded attachment to %s", target_path)
-        except Exception as ex:  # noqa: BLE001
-            self.logger.warning(
-                "Failed to download attachment %s from %s: %s",
-                row.get("Id"),
-                uri,
-                ex,
-            )
+        except Exception as ex:
+            self.logger.warning("Failed to download attachment %s from %s: %s", row.get("Id"), uri, ex)
 
     def post_process(self, row: dict, context: Optional[dict] = None) -> Optional[dict]:
         row = super().post_process(row, context) or row
