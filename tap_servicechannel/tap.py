@@ -33,7 +33,7 @@ class TapServiceChannel(Tap):
         th.Property("username", th.StringType),
         th.Property("password", th.StringType),
         th.Property("start_date", th.DateTimeType, description="The earliest record date to sync"),
-        th.Property("download_attachments", th.BooleanType, default=False),
+        th.Property("download_attachments", th.BooleanType, default=True),
     ).to_dict()
 
     def discover_streams(self) -> List[Stream]:
