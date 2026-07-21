@@ -402,6 +402,6 @@ class AttachmentsStream(ServiceChannelStream):
         # The API response omits the work-order link; carry it over from the
         # parent context so downstream joins back to invoices/work orders work.
         row["wo_tracking_number"] = (context or {}).get("wo_tracking_number")
-        if self.config.get("download_attachments"):
+        if self.config.get("download_attachments", True):
             row["attachment_path"] = self._download_attachment(row, context)
         return row
