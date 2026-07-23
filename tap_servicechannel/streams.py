@@ -27,6 +27,7 @@ class TradesStream(ServiceChannelStream):
     path = "/v3/trades"
     replication_key = None
     records_jsonpath = "$[*]"
+    paginate = False
 
     schema = th.PropertiesList(
         th.Property("Id", th.IntegerType),
@@ -38,11 +39,6 @@ class TradesStream(ServiceChannelStream):
         self, context: Optional[dict], next_page_token: Optional[Any]
     ) -> Dict[str, Any]:
         return {}
-
-    def get_next_page_token(
-        self, response: requests.Response, previous_token: Optional[Any]
-    ) -> None:
-        return None
 
     def get_child_context(self, record: dict, context: Optional[dict]) -> dict:
         return {"trade_id": record["Id"]}
@@ -67,6 +63,7 @@ class VendorsStream(ServiceChannelStream):
     parent_stream_type = TradesStream
     replication_key = None
     records_jsonpath = "$.Providers[*]"
+    paginate = False
 
     schema = th.PropertiesList(
         th.Property("Id", th.IntegerType),
@@ -82,11 +79,6 @@ class VendorsStream(ServiceChannelStream):
         self, context: Optional[dict], next_page_token: Optional[Any]
     ) -> Dict[str, Any]:
         return {"tradeId": (context or {})["trade_id"]}
-
-    def get_next_page_token(
-        self, response: requests.Response, previous_token: Optional[Any]
-    ) -> None:
-        return None
 
     def post_process(self, row: dict, context: Optional[dict] = None) -> Optional[dict]:
         row = super().post_process(row, context) or row
@@ -325,6 +317,8 @@ class AttachmentsStream(ServiceChannelStream):
     path = "/v3/odata/workorders({wo_tracking_number})/attachments"
     parent_stream_type = InvoicesStream
     replication_key = None
+    # No replication key, so pin a stable sort for $top/$skip pagination.
+    orderby = "Id"
 
     schema = th.PropertiesList(
         th.Property("Id", th.IntegerType),

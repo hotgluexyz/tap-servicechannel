@@ -1,5 +1,5 @@
 import os
-from datetime import timedelta, timezone
+from datetime import timezone
 from typing import Any, Dict, Optional
 from hotglue_singer_sdk.streams import RESTStream
 from memoization import cached
@@ -13,11 +13,11 @@ class ServiceChannelStream(RESTStream):
     primary_keys = ["Id"]
     replication_key = "UpdatedDate"
     replication_format = "%Y-%m-%dT%H:%M:%S%z"
-    # Timezone used when emitting the replication filter value (UTC-04:00).
-    replication_tz = timezone(timedelta(hours=-4))
     records_jsonpath = "$.value[*]"
     page_size = 50
     expand_fields = None
+    paginate = True
+    orderby = None
 
     @property
     @cached
@@ -28,6 +28,8 @@ class ServiceChannelStream(RESTStream):
     def get_next_page_token(
         self, response, previous_token: Optional[Any]
     ) -> Optional[int]:
+        if not self.paginate:
+            return None
         records = response.json().get("value", [])
         if len(records) < self.page_size:
             return None
@@ -41,14 +43,17 @@ class ServiceChannelStream(RESTStream):
             params["$skip"] = next_page_token
         if self.expand_fields:
             params["$expand"] = self.expand_fields
+        # A stable $orderby is required for correct $top/$skip pagination.
+        orderby = self.orderby or self.replication_key
+        if orderby:
+            params["$orderby"] = f"{orderby} asc"
         if self.replication_key:
-            params["$orderby"] = f"{self.replication_key} asc"
             start_date = self.get_starting_timestamp(context)
             if start_date:
-                value = start_date.astimezone(self.replication_tz).strftime(
+                value = start_date.astimezone(timezone.utc).strftime(
                     self.replication_format
                 )
-                # strftime renders %z as "-0400"; OData wants "-04:00".
+                # strftime renders %z as "+0000"; OData wants "+00:00".
                 value = f"{value[:-2]}:{value[-2:]}"
                 params["$filter"] = f"{self.replication_key} ge {value}"
         return params
